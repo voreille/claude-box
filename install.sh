@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the claude-box image for the current user and put the launcher on PATH.
+# Build the claude-box image for the current user, create .env and put the launcher on PATH.
 # Extra arguments are passed to `docker build` (e.g. ./install.sh --no-cache).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -13,6 +13,11 @@ if ! docker context inspect "$CONTEXT" >/dev/null 2>&1; then
 fi
 
 docker --context "$CONTEXT" build -t "$IMAGE" "$@" .
+
+if [[ ! -f .env ]]; then
+  cp .env.example .env
+  echo "Created $PWD/.env from .env.example: edit it to add caches, data folders, GPUs..."
+fi
 
 mkdir -p "$HOME/bin"
 ln -sf "$PWD/claude-box" "$HOME/bin/claude-box"

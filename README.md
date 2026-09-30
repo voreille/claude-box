@@ -9,7 +9,8 @@ only modify the project you are working on, and nothing else on the server.
 |---|---|
 | The current git repo (+ folders passed with `--add-dir`) | read + write |
 | `~/.claude-box` (Claude login, uv cache, venvs) | read + write |
-| Data that the repo symlinks to, or listed in `.claude-box.mounts` | **read-only** |
+| Data that the repo symlinks to, or listed in `.claude-box.mounts` or `CLAUDE_BOX_RO` | **read-only** |
+| Folders listed in `CLAUDE_BOX_RW` in `.env` (e.g. the Hugging Face cache) | read + write |
 | `~/.gitconfig` | read-only (so commits use your name) |
 | Everything else (your home, other repos, other users, the system) | **not visible at all** |
 
@@ -53,8 +54,10 @@ cd ~/claude-box
 ./install.sh
 ```
 
-This builds the `claude-box` image in your rootless daemon and links the launcher to
-`~/bin/claude-box`. If `~/bin` is not on your `PATH`, the script tells you how to add it.
+This builds the `claude-box` image in your rootless daemon, creates your personal `.env` from
+`.env.example` (`.env` is git-ignored), and links the launcher to `~/bin/claude-box`. If `~/bin` is
+not on your `PATH`, the script tells you how to add it. All your settings live in that one `.env`
+file, see [Settings](#settings-env).
 
 ### 3. First run and login
 
@@ -75,7 +78,7 @@ claude-box --continue                        # any claude argument is passed thr
 claude-box shell                             # bash in the same environment, for debugging
 claude-box mounts --add-dir ../other-repo    # list what the box would see (read-write / read-only)
 claude-box --add-dir ../other-repo          # also give access to another repo
-CLAUDE_BOX_GPUS=all claude-box               # with GPUs
+CLAUDE_BOX_GPUS=all claude-box               # with GPUs (or set it in .env)
 CLAUDE_BOX_DRY_RUN=1 claude-box              # print the docker command, run nothing
 ```
 
@@ -129,16 +132,54 @@ To mount extra folders, or a single parent folder instead of many small ones, cr
 If a repo has many symlinks to scattered places, list the parent folders in that file and set
 `CLAUDE_BOX_AUTO_MOUNTS=0`.
 
-## Configuration
+## Settings (`.env`)
 
-| Variable | Default | Meaning |
+Everything is configured in `~/claude-box/.env` (created by `install.sh` from `.env.example`, never
+committed). Format is `KEY=value`, one per line; `~` and `$HOME` are expanded, and path lists use
+`:` as separator.
+
+```bash
+# Extra folders mounted READ-WRITE in every project (caches that can be re-downloaded)
+CLAUDE_BOX_RW=~/.cache/huggingface
+# Extra folders mounted READ-ONLY in every project
+CLAUDE_BOX_RO=/mnt/nas/shared_datasets
+# GPUs (empty = none)
+CLAUDE_BOX_GPUS=all
+
+# Any other line becomes an environment variable inside the box
+HF_HOME=~/.cache/huggingface
+# A bare name passes the host's current value (e.g. exported in ~/.bashrc)
+WANDB_API_KEY
+```
+
+| Key | Default | Meaning |
 |---|---|---|
+| `CLAUDE_BOX_RW` | *(none)* | Extra read-write folders (not treated as projects) |
+| `CLAUDE_BOX_RO` | *(none)* | Extra read-only folders, for every project |
 | `CLAUDE_BOX_GPUS` | *(none)* | Value passed to `docker --gpus` (e.g. `all`, `device=0`) |
 | `CLAUDE_BOX_AUTO_MOUNTS` | `1` | Auto-mount symlink targets read-only |
 | `CLAUDE_BOX_CONTEXT` | `rootless` | Docker context to use |
 | `CLAUDE_BOX_IMAGE` | `claude-box` | Image name |
 | `CLAUDE_BOX_HOME` | `~/.claude-box` | Persistent state directory |
 | `CLAUDE_BOX_DRY_RUN` | `0` | Print the docker command instead of running it |
+
+A `CLAUDE_BOX_*` variable set in your shell overrides `.env` for one run, e.g.
+`CLAUDE_BOX_GPUS=all claude-box`.
+
+### Hugging Face and other caches
+
+Inside the box `$HOME` is `/box`, so tools that store things in `~/.cache` would start from an empty
+cache and re-download everything. The default `.env` therefore shares your Hugging Face cache
+**read-write** and sets `HF_HOME` so the hub library finds it. Read-write is deliberate: new models
+can still be downloaded, and the worst case is a deleted cache entry you can re-download. Your HF
+token (for gated models) lives in that folder, so gated models work too. For torch hub weights,
+uncomment the `TORCH_HOME` line and add `~/.cache/torch` to `CLAUDE_BOX_RW`.
+
+Paths that are symlinks (e.g. `~/.cache/huggingface -> /mnt/nas/hf`) are handled: both the link path
+and its target are mounted. Check the result with `claude-box mounts`.
+
+Rule of thumb: **read-write** for anything that can be re-downloaded or regenerated, **read-only**
+for anything you cannot afford to lose.
 
 ## Updating Claude Code
 

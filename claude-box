@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # claude-box: run Claude Code in a rootless Docker container that can only
-# write to the current git repo (plus any --add-dir folders, and its own
-# state dir ~/.claude-box).
+# write to the current git repo (plus any --add-dir folders, folders listed
+# in CLAUDE_BOX_RW, and its own state dir ~/.claude-box).
 #
 # Usage:
 #   claude-box [claude args...]          start Claude Code in the current repo
@@ -9,25 +9,54 @@
 #   claude-box shell [--add-dir ...]     open a bash shell in the same container setup
 #   claude-box mounts [--add-dir ...]    show what the box would have access to, and exit
 #
-# Environment variables:
-#   CLAUDE_BOX_GPUS=all           pass GPUs (any value accepted by docker --gpus)
-#   CLAUDE_BOX_AUTO_MOUNTS=0      disable automatic mounting of symlink targets
-#   CLAUDE_BOX_DRY_RUN=1          print the docker command instead of running it
-#   CLAUDE_BOX_CONTEXT            docker context (default: rootless)
-#   CLAUDE_BOX_IMAGE              image name (default: claude-box)
-#   CLAUDE_BOX_HOME               state dir (default: ~/.claude-box)
+# Settings live in .env next to this script (see .env.example). Any CLAUDE_BOX_*
+# variable set in your shell overrides .env, e.g. CLAUDE_BOX_GPUS=all claude-box
+# Other settings: CLAUDE_BOX_DRY_RUN=1 (print docker command), CLAUDE_BOX_CONTEXT
+# (default rootless), CLAUDE_BOX_IMAGE (default claude-box), CLAUDE_BOX_HOME
+# (default ~/.claude-box).
 set -euo pipefail
+
+die() { echo "claude-box: $*" >&2; exit 1; }
+warn() { echo "claude-box: warning: $*" >&2; }
+expand() { local v="$1"; v="${v/#\~/$HOME}"; v="${v//\$\{HOME\}/$HOME}"; v="${v//\$HOME/$HOME}"; printf '%s' "$v"; }
+
+# --- .env next to the (real) script ------------------------------------------
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+ENV_FILE="$SCRIPT_DIR/.env"
+BOX_ENV=()          # -e arguments for the container
+declare -A FROM_SHELL=()   # CLAUDE_BOX_* already set in the shell win over .env
+for v in $(compgen -v CLAUDE_BOX_ || true); do FROM_SHELL[$v]=1; done
+if [[ -f "$ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    line="${line#export }"
+    if [[ "$line" != *=* ]]; then                      # bare KEY: pass host value
+      [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { warn ".env: ignoring '$line'"; continue; }
+      [[ -n "${!line:-}" ]] && BOX_ENV+=(-e "$line")
+      continue
+    fi
+    key="${line%%=*}"; val="${line#*=}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { warn ".env: ignoring '$line'"; continue; }
+    val="${val%%[[:space:]]#*}"                          # strip trailing comment
+    val="${val%"${val##*[![:space:]]}"}"
+    if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then val="${BASH_REMATCH[1]}"; fi
+    if [[ "$key" == CLAUDE_BOX_* ]]; then
+      [[ -z "${FROM_SHELL[$key]:-}" ]] && printf -v "$key" '%s' "$val"   # later lines override earlier ones
+    else
+      BOX_ENV+=(-e "$key=$(expand "$val")")
+    fi
+  done < "$ENV_FILE"
+fi
 
 CONTEXT="${CLAUDE_BOX_CONTEXT:-rootless}"
 IMAGE="${CLAUDE_BOX_IMAGE:-claude-box}"
-BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
+BOX_HOME="$(expand "${CLAUDE_BOX_HOME:-$HOME/.claude-box}")"
 DRY_RUN="${CLAUDE_BOX_DRY_RUN:-0}"
-
-die() { echo "claude-box: $*" >&2; exit 1; }
 
 MODE=claude
 case "${1:-}" in
-  -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   shell) MODE=shell; shift ;;
   mounts) MODE=mounts; shift ;;
 esac
@@ -44,6 +73,20 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 ROOT="$(readlink -f "$ROOT")"
 check_rw "$ROOT"
 RW_DIRS=("$ROOT")
+
+# --- Extra read-write folders from CLAUDE_BOX_RW (not scanned, not passed to Claude)
+CFG_RW=(); CFG_ALIAS=()
+IFS=: read -r -a _rw <<< "${CLAUDE_BOX_RW:-}"
+for d in "${_rw[@]}"; do
+  [[ -z "$d" ]] && continue
+  d="$(expand "$d")"
+  [[ -d "$d" ]] || { warn "CLAUDE_BOX_RW: '$d' is not a directory, skipped"; continue; }
+  real="$(readlink -f "$d")"; check_rw "$real"; CFG_RW+=("$real")
+  # If the path is itself a symlink (e.g. ~/.cache/huggingface -> /mnt/nas/hf),
+  # also mount it under that path so env vars pointing there keep working.
+  abs="$(cd "$d" && pwd -L)"
+  [[ "$abs" != "$real" ]] && CFG_ALIAS+=(-v "$real:$abs")
+done
 
 add_rw() {
   local d
@@ -68,7 +111,7 @@ done
 
 inside_rw() {
   local p="$1" d
-  for d in "${RW_DIRS[@]}"; do
+  for d in "${RW_DIRS[@]}" "${CFG_RW[@]}"; do
     [[ "$p" == "$d" || "$p" == "$d"/* ]] && return 0
   done
   return 1
@@ -92,21 +135,30 @@ add_ro() {
   RO+=(-v "$p:$p:ro")
 }
 
+# 1) CLAUDE_BOX_RO from .env (every project)
+IFS=: read -r -a _ro <<< "${CLAUDE_BOX_RO:-}"
+for p in "${_ro[@]}"; do
+  [[ -z "$p" ]] && continue
+  p="$(expand "$p")"
+  [[ -e "$p" ]] || { warn "CLAUDE_BOX_RO: '$p' does not exist, skipped"; continue; }
+  add_ro "$(readlink -f "$p")"
+done
+
 for d in "${RW_DIRS[@]}"; do
-  # 1) Explicit list: one path per line in <folder>/.claude-box.mounts (# comments ok)
+  # 2) Per-project list: one path per line in <folder>/.claude-box.mounts (# comments ok)
   if [[ -f "$d/.claude-box.mounts" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
       line="${line%%#*}"
       line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
       [[ -z "$line" ]] && continue
-      line="${line/#\~/$HOME}"
+      line="$(expand "$line")"
       [[ "$line" == /* ]] || line="$d/$line"
-      [[ -e "$line" ]] || { echo "claude-box: warning: '$line' does not exist, skipped" >&2; continue; }
+      [[ -e "$line" ]] || { warn "'$line' does not exist, skipped"; continue; }
       add_ro "$(readlink -f "$line")"
     done < "$d/.claude-box.mounts"
   fi
 
-  # 2) Automatic: targets of symlinks inside the folder that point outside of it
+  # 3) Automatic: targets of symlinks inside the folder that point outside of it
   if [[ "${CLAUDE_BOX_AUTO_MOUNTS:-1}" == 1 ]]; then
     while IFS= read -r -d '' link; do
       target="$(readlink -f "$link" 2>/dev/null)" || continue
@@ -119,24 +171,31 @@ for d in "${RW_DIRS[@]}"; do
 done
 
 if (( ${#RO[@]} / 2 > 30 )); then
-  echo "claude-box: warning: $(( ${#RO[@]} / 2 )) read-only mounts. Consider listing parent folders in .claude-box.mounts" >&2
+  warn "$(( ${#RO[@]} / 2 )) read-only mounts. Consider listing parent folders in .claude-box.mounts"
   echo "            and setting CLAUDE_BOX_AUTO_MOUNTS=0." >&2
 fi
 
 if [[ "$MODE" == mounts ]]; then
   echo "Read-write:"
   for d in "${RW_DIRS[@]}"; do echo "  $d"; done
+  for d in "${CFG_RW[@]}"; do echo "  $d  (CLAUDE_BOX_RW)"; done
   echo "  $BOX_HOME  (Claude login, uv cache, venvs; seen as /box)"
   echo "Read-only:"
   for (( i=1; i<${#RO[@]}; i+=2 )); do echo "  ${RO[i]%%:*}"; done
   [[ -f "$HOME/.gitconfig" ]] && echo "  $HOME/.gitconfig  (seen as /etc/gitconfig)"
+  if (( ${#BOX_ENV[@]} )); then
+    echo "Environment variables from .env:"
+    for (( i=1; i<${#BOX_ENV[@]}; i+=2 )); do echo "  ${BOX_ENV[i]%%=*}"; done
+  fi
+  [[ -n "${CLAUDE_BOX_GPUS:-}" ]] && echo "GPUs: $CLAUDE_BOX_GPUS"
   echo "Everything else on the server: not visible."
   exit 0
 fi
 
-# --- Other options ------------------------------------------------------------
+# --- Assemble the docker command ---------------------------------------------
 RW=()
-for d in "${RW_DIRS[@]}"; do RW+=(-v "$d:$d"); done
+for d in "${RW_DIRS[@]}" "${CFG_RW[@]}"; do RW+=(-v "$d:$d"); done
+RW+=("${CFG_ALIAS[@]}")
 
 EXTRA=()
 [[ -n "${CLAUDE_BOX_GPUS:-}" ]] && EXTRA+=(--gpus "$CLAUDE_BOX_GPUS")
@@ -145,8 +204,8 @@ EXTRA=()
 
 if [[ "$MODE" == shell ]]; then CMD=(bash); else CMD=(claude "${ARGS[@]}"); fi
 
-# Note: each project gets its own venv under ~/.claude-box/venvs, chosen by the
-# uv wrapper inside the image (uv-shim.sh), so host .venv folders are never touched.
+# Each project gets its own venv under ~/.claude-box/venvs, chosen by the uv
+# wrapper inside the image (uv-shim.sh), so host .venv folders are never touched.
 DOCKER=(docker --context "$CONTEXT" run --rm --init
   --security-opt no-new-privileges
   --hostname claude-box
@@ -155,6 +214,7 @@ DOCKER=(docker --context "$CONTEXT" run --rm --init
   -e COLORTERM="${COLORTERM:-}"
   -e UV_CACHE_DIR=/box/.cache/uv
   -e IS_SANDBOX=1
+  "${BOX_ENV[@]}"
   -v "$BOX_HOME:/box"
   "${RW[@]}"
   -w "$(pwd -P)"
