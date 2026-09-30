@@ -5,8 +5,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep procps less \
  && rm -rf /var/lib/apt/lists/*
 
-# uv (Python package / project manager)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# uv, behind a small wrapper that keeps one venv per project in the box home
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/lib/uv/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uvx /usr/local/lib/uv/uvx
+COPY uv-shim.sh /usr/local/bin/uv
+RUN chmod 755 /usr/local/bin/uv && ln -s /usr/local/lib/uv/uvx /usr/local/bin/uvx
 
 # Claude Code, copied to a system path so it runs regardless of $HOME
 RUN curl -fsSL https://claude.ai/install.sh | bash \

@@ -7,7 +7,7 @@ only modify the project you are working on, and nothing else on the server.
 
 | Location | Access from inside the box |
 |---|---|
-| The current git repo | read + write |
+| The current git repo (+ folders passed with `--add-dir`) | read + write |
 | `~/.claude-box` (Claude login, uv cache, venvs) | read + write |
 | Data that the repo symlinks to, or listed in `.claude-box.mounts` | **read-only** |
 | `~/.gitconfig` | read-only (so commits use your name) |
@@ -73,6 +73,8 @@ claude-box                                   # start Claude Code in the current 
 claude-box --dangerously-skip-permissions    # no confirmation prompts (the box is the boundary)
 claude-box --continue                        # any claude argument is passed through
 claude-box shell                             # bash in the same environment, for debugging
+claude-box mounts --add-dir ../other-repo    # list what the box would see (read-write / read-only)
+claude-box --add-dir ../other-repo          # also give access to another repo
 CLAUDE_BOX_GPUS=all claude-box               # with GPUs
 CLAUDE_BOX_DRY_RUN=1 claude-box              # print the docker command, run nothing
 ```
@@ -80,10 +82,33 @@ CLAUDE_BOX_DRY_RUN=1 claude-box              # print the docker command, run not
 You can start it from any subfolder: the whole git repo is mounted (at the **same absolute path**
 as on the host, so paths and relative symlinks behave the same inside and outside).
 
+### Working on several repos
+
+Claude only sees the repo you start it from. To give it more:
+
+```bash
+# Read-write access to other repos (mounted, and passed to Claude's own --add-dir)
+cd ~/workspaces/repo-a
+claude-box --add-dir ../repo-b ../repo-c
+
+# Read-only access, e.g. a repo Claude should only look at for reference:
+# add its path to .claude-box.mounts (see "Data and symlinks" below)
+
+# Everything in a folder of repos, read-write (convenient, but less protection)
+cd ~/workspaces
+claude-box
+```
+
+In the last case, Claude can modify every repo in `~/workspaces`, so make sure they are all
+committed. Symlink scanning then covers all repos; if that is slow, set `CLAUDE_BOX_AUTO_MOUNTS=0`
+and use `.claude-box.mounts` in `~/workspaces`.
+
 ### Python / uv
 
-Inside the box, uv uses its own venv per project (`~/.claude-box/venvs/<project>-<hash>`), so your
-host `.venv` is never touched. The first time, ask Claude to run `uv sync`. PyTorch wheels bring
+Inside the box, `uv` is a small wrapper (`uv-shim.sh`) that gives each project its own venv in
+`~/.claude-box/venvs/<project>-<hash>`, so your host `.venv` folders are never touched, even when
+Claude works across several repos. Always go through `uv run ...` inside the box, since the
+project's `.venv/bin/python` belongs to the host and won't work there. The first time, ask Claude to run `uv sync`. PyTorch wheels bring
 their own CUDA libraries, so no CUDA image is needed.
 
 ### Data and symlinks
@@ -134,5 +159,5 @@ cd ~/claude-box && git pull && ./install.sh --no-cache
 - **`--dangerously-skip-permissions` refuses to run as root**: the launcher sets `IS_SANDBOX=1`,
   which is the usual workaround. If a Claude Code update changes this, check the Claude Code docs or
   issues.
-- **The launcher refuses to start**: it won't mount `/` or your home directory read-write. Run it
-  from inside a project folder.
+- **The launcher refuses to start**: it won't mount `/` or your home directory read-write (neither
+  as the current folder nor with `--add-dir`). Run it from inside a project folder.
