@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# claude-box: run Claude Code in a rootless Docker container that can only
+# write to the current git repo (and to its own state dir, ~/.claude-box).
+#
+# Usage:
+#   claude-box [claude args...]   start Claude Code in the current repo
+#   claude-box shell              open a bash shell in the same container setup
+#
+# Environment variables:
+#   CLAUDE_BOX_GPUS=all           pass GPUs (any value accepted by docker --gpus)
+#   CLAUDE_BOX_AUTO_MOUNTS=0      disable automatic mounting of symlink targets
+#   CLAUDE_BOX_DRY_RUN=1          print the docker command instead of running it
+#   CLAUDE_BOX_CONTEXT            docker context (default: rootless)
+#   CLAUDE_BOX_IMAGE              image name (default: claude-box)
+#   CLAUDE_BOX_HOME               state dir (default: ~/.claude-box)
+set -euo pipefail
+
+CONTEXT="${CLAUDE_BOX_CONTEXT:-rootless}"
+IMAGE="${CLAUDE_BOX_IMAGE:-claude-box}"
+BOX_HOME="${CLAUDE_BOX_HOME:-$HOME/.claude-box}"
+DRY_RUN="${CLAUDE_BOX_DRY_RUN:-0}"
+
+MODE=claude
+case "${1:-}" in
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  shell) MODE=shell; shift ;;
+esac
+
+die() { echo "claude-box: $*" >&2; exit 1; }
+
+# --- Project root: the git repo containing $PWD, else $PWD itself -----------
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ROOT="$(readlink -f "$ROOT")"
+case "$ROOT" in
+  /|"$HOME"|"$(dirname "$HOME")") die "refusing to mount '$ROOT' read-write; run from inside a project folder." ;;
+esac
+
+if [[ "$DRY_RUN" != 1 ]] && ! docker context inspect "$CONTEXT" >/dev/null 2>&1; then
+  die "docker context '$CONTEXT' not found. Install rootless Docker first (see README)."
+fi
+
+mkdir -p "$BOX_HOME"
+
+# --- Read-only mounts ---------------------------------------------------------
+declare -A SEEN=()
+RO=()
+add_ro() {
+  local p="$1"
+  [[ -n "$p" && -e "$p" ]] || return 0
+  [[ "$p" == "/" ]] && return 0
+  [[ "$p" == "$ROOT" || "$p" == "$ROOT"/* ]] && return 0   # already inside the repo
+  [[ -n "${SEEN[$p]:-}" ]] && return 0
+  SEEN[$p]=1
+  RO+=(-v "$p:$p:ro")
+}
+
+# 1) Explicit list: one path per line in <repo>/.claude-box.mounts (# comments ok)
+if [[ -f "$ROOT/.claude-box.mounts" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    line="${line/#\~/$HOME}"
+    [[ -e "$line" ]] || { echo "claude-box: warning: '$line' does not exist, skipped" >&2; continue; }
+    add_ro "$(readlink -f "$line")"
+  done < "$ROOT/.claude-box.mounts"
+fi
+
+# 2) Automatic: targets of symlinks inside the repo that point outside of it
+if [[ "${CLAUDE_BOX_AUTO_MOUNTS:-1}" == 1 ]]; then
+  while IFS= read -r -d '' link; do
+    target="$(readlink -f "$link" 2>/dev/null)" || continue
+    [[ -e "$target" ]] || continue
+    [[ -d "$target" ]] || target="$(dirname "$target")"
+    add_ro "$target"
+  done < <(find "$ROOT" \( -name .git -o -name .venv -o -name node_modules -o -name __pycache__ \) -prune \
+             -o -type l -print0 2>/dev/null)
+fi
+
+if (( ${#RO[@]} / 2 > 30 )); then
+  echo "claude-box: warning: $(( ${#RO[@]} / 2 )) read-only mounts. Consider listing parent folders in .claude-box.mounts" >&2
+  echo "            and setting CLAUDE_BOX_AUTO_MOUNTS=0." >&2
+fi
+
+# --- Other options ------------------------------------------------------------
+EXTRA=()
+[[ -n "${CLAUDE_BOX_GPUS:-}" ]] && EXTRA+=(--gpus "$CLAUDE_BOX_GPUS")
+[[ -f "$HOME/.gitconfig" ]] && EXTRA+=(-v "$HOME/.gitconfig:/etc/gitconfig:ro")
+[[ -t 0 && -t 1 ]] && EXTRA+=(-it)
+
+# One venv per project, stored in the box home (never touches the host .venv)
+VENV_NAME="$(basename "$ROOT")-$(printf '%s' "$ROOT" | sha1sum | cut -c1-8)"
+
+if [[ "$MODE" == shell ]]; then CMD=(bash); else CMD=(claude "$@"); fi
+
+DOCKER=(docker --context "$CONTEXT" run --rm --init
+  --security-opt no-new-privileges
+  --hostname claude-box
+  -e HOME=/box
+  -e TERM="${TERM:-xterm-256color}"
+  -e COLORTERM="${COLORTERM:-}"
+  -e UV_PROJECT_ENVIRONMENT="/box/venvs/$VENV_NAME"
+  -e UV_CACHE_DIR=/box/.cache/uv
+  -e IS_SANDBOX=1
+  -v "$BOX_HOME:/box"
+  -v "$ROOT:$ROOT"
+  -w "$(pwd -P)"
+  "${RO[@]}"
+  "${EXTRA[@]}"
+  "$IMAGE" "${CMD[@]}")
+
+if [[ "$DRY_RUN" == 1 ]]; then
+  printf '%q ' "${DOCKER[@]}"; echo
+else
+  exec "${DOCKER[@]}"
+fi
