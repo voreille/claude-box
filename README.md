@@ -135,8 +135,16 @@ If a repo has many symlinks to scattered places, list the parent folders in that
 ## Settings (`.env`)
 
 Everything is configured in `~/claude-box/.env` (created by `install.sh` from `.env.example`, never
-committed). Format is `KEY=value`, one per line; `~` and `$HOME` are expanded, and path lists use
-`:` as separator.
+committed). Format is `KEY=value`, one per line; `~` and `$HOME` are expanded. The file is parsed, not executed,
+so nothing in it can run commands.
+
+Path lists use `:` as separator, like `PATH`, with no spaces:
+
+```bash
+CLAUDE_BOX_RW=~/.cache/huggingface:~/.cache/torch
+```
+
+`CLAUDE_BOX_RW=folder1 folder2` does **not** work: it is read as a single path containing a space.
 
 ```bash
 # Extra folders mounted READ-WRITE in every project (caches that can be re-downloaded)
