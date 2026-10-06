@@ -188,6 +188,8 @@ if [[ "$MODE" == mounts ]]; then
     for (( i=1; i<${#BOX_ENV[@]}; i+=2 )); do echo "  ${BOX_ENV[i]%%=*}"; done
   fi
   [[ -n "${CLAUDE_BOX_GPUS:-}" ]] && echo "GPUs: $CLAUDE_BOX_GPUS"
+  for d in "${RW_DIRS[@]}"; do [[ -d "$d/.venv" ]] && echo "Hidden: $d/.venv (host venv, masked)"; done
+  [[ -f "$SCRIPT_DIR/box-CLAUDE.md" ]] && echo "Box instructions: box-CLAUDE.md (seen as /box/.claude/CLAUDE.md)"
   echo "Everything else on the server: not visible."
   exit 0
 fi
@@ -201,6 +203,17 @@ EXTRA=()
 [[ -n "${CLAUDE_BOX_GPUS:-}" ]] && EXTRA+=(--gpus "$CLAUDE_BOX_GPUS")
 [[ -f "$HOME/.gitconfig" ]] && EXTRA+=(-v "$HOME/.gitconfig:/etc/gitconfig:ro")
 [[ -t 0 && -t 1 ]] && EXTRA+=(-it)
+# Hide host venvs: their interpreters don't exist in the box, and the box uses
+# its own per-project venvs (uv-shim.sh). Masked with an empty tmpfs.
+for d in "${RW_DIRS[@]}"; do
+  [[ -d "$d/.venv" ]] && EXTRA+=(--mount "type=tmpfs,destination=$d/.venv")
+done
+
+if [[ -f "$SCRIPT_DIR/box-CLAUDE.md" ]]; then
+  EXTRA+=(-v "$SCRIPT_DIR/box-CLAUDE.md:/box/.claude/CLAUDE.md:ro")
+else
+  warn "box-CLAUDE.md not found next to the script; Claude won't get the box instructions."
+fi
 
 if [[ "$MODE" == shell ]]; then CMD=(bash); else CMD=(claude "${ARGS[@]}"); fi
 
