@@ -161,6 +161,10 @@ Relative paths are relative to the repo root. `:rw` entries behave like `--add-d
 to Claude as part of the session, and their `.venv` is hidden too. Only the `.claude-box.mounts` of
 the repo you start from can grant read-write access. Check the result with `claude-box mounts`.
 
+Symlinks are only followed in read-write folders (the repo, `--add-dir` and `:rw` entries).
+Read-only entries are mounted as they are: if one contains a symlink pointing outside of it, add the
+target to `.claude-box.mounts` as well.
+
 If a repo has many symlinks to scattered places, list the parent folders in that file and set
 `CLAUDE_BOX_AUTO_MOUNTS=0`.
 
