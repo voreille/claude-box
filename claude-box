@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # claude-box: run Claude Code in a rootless Docker container that can only
-# write to the current git repo (plus any --add-dir folders, folders listed
-# in CLAUDE_BOX_RW, and its own state dir ~/.claude-box).
+# write to the current git repo (plus any --add-dir folders, ":rw" entries in
+# .claude-box.mounts, folders listed in CLAUDE_BOX_RW, and its own state dir
+# ~/.claude-box).
 #
 # Usage:
 #   claude-box [claude args...]          start Claude Code in the current repo
@@ -56,7 +57,7 @@ DRY_RUN="${CLAUDE_BOX_DRY_RUN:-0}"
 
 MODE=claude
 case "${1:-}" in
-  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   shell) MODE=shell; shift ;;
   mounts) MODE=mounts; shift ;;
 esac
@@ -66,6 +67,13 @@ check_rw() {
   case "$1" in
     /|"$HOME"|"$(dirname "$HOME")") die "refusing to mount '$1' read-write; use a project folder." ;;
   esac
+}
+
+# Strip a trailing "# comment" and surrounding whitespace from a mounts-file line
+clean_line() {
+  local l="${1%%#*}"
+  l="${l#"${l%%[![:space:]]*}"}"; l="${l%"${l##*[![:space:]]}"}"
+  printf '%s' "$l"
 }
 
 # --- Read-write folders: the current repo + every --add-dir ------------------
@@ -109,6 +117,21 @@ while (( $# )); do
   esac
 done
 
+# --- Read-write entries ("<path>:rw") in the current repo's .claude-box.mounts.
+# Handled before the read-only pass so nothing gets mounted twice. They behave
+# like --add-dir: mounted read-write and passed to Claude.
+if [[ -f "$ROOT/.claude-box.mounts" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(clean_line "$line")"
+    [[ "$line" =~ ^(.+):rw$ ]] || continue
+    p="$(expand "${BASH_REMATCH[1]}")"
+    [[ "$p" == /* ]] || p="$ROOT/$p"
+    [[ -d "$p" ]] || { warn "'$p' is not a directory, skipped"; continue; }
+    p="$(readlink -f "$p")"; check_rw "$p"
+    RW_DIRS+=("$p"); ARGS+=(--add-dir "$p")
+  done < "$ROOT/.claude-box.mounts"
+fi
+
 inside_rw() {
   local p="$1" d
   for d in "${RW_DIRS[@]}" "${CFG_RW[@]}"; do
@@ -145,12 +168,14 @@ for p in "${_ro[@]}"; do
 done
 
 for d in "${RW_DIRS[@]}"; do
-  # 2) Per-project list: one path per line in <folder>/.claude-box.mounts (# comments ok)
+  # 2) Per-project list: one path per line in <folder>/.claude-box.mounts
+  #    ("# comments" ok; "<path>:rw" handled above; optional explicit "<path>:ro")
   if [[ -f "$d/.claude-box.mounts" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
-      line="${line%%#*}"
-      line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+      line="$(clean_line "$line")"
       [[ -z "$line" ]] && continue
+      [[ "$line" == *:rw ]] && continue   # read-write entry, handled above
+      line="${line%:ro}"
       line="$(expand "$line")"
       [[ "$line" == /* ]] || line="$d/$line"
       [[ -e "$line" ]] || { warn "'$line' does not exist, skipped"; continue; }

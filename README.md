@@ -7,20 +7,24 @@ only modify the project you are working on, and nothing else on the server.
 
 | Location | Access from inside the box |
 |---|---|
-| The current git repo (+ folders passed with `--add-dir`) | read + write |
-| `~/.claude-box` (Claude login, uv cache, venvs) | read + write |
-| Data that the repo symlinks to, or listed in `.claude-box.mounts` or `CLAUDE_BOX_RO` | **read-only** |
+| The current git repo (+ folders passed with `--add-dir` or marked `:rw` in `.claude-box.mounts`) | read + write |
+| `~/.claude-box` (Claude login, sessions, uv cache, venvs) | read + write |
 | Folders listed in `CLAUDE_BOX_RW` in `.env` (e.g. the Hugging Face cache) | read + write |
+| Data that the repo symlinks to, or listed in `.claude-box.mounts` or `CLAUDE_BOX_RO` | **read-only** |
 | `~/.gitconfig` | read-only (so commits use your name) |
+| `box-CLAUDE.md` (instructions about the box, for Claude) | read-only |
+| The repo's own `.venv` (host environment) | **hidden** (masked by an empty folder) |
 | Everything else (your home, other repos, other users, the system) | **not visible at all** |
 
 Because Docker runs *rootless*, "root" inside the container is just **your own user** on the host:
 files Claude creates belong to you, and even a container escape would not give more rights than you
 already have.
 
-What it does **not** protect: the repo itself. Claude can edit or delete anything in it, so
-**commit before each session**, and keep important untracked outputs (results, checkpoints) outside
-the repo. The container also has normal outgoing network access (needed for the Claude API and PyPI).
+What it does **not** protect: the read-write folders themselves. Claude can edit or delete anything
+in them, so **commit before each session**, and keep important untracked outputs (results,
+checkpoints) outside the repo. The container also has normal outgoing network access (needed for
+the Claude API and PyPI). There are no git credentials in the box: Claude commits locally, and you
+push from the host.
 
 ## Setup (once per user)
 
@@ -74,28 +78,39 @@ stored in `~/.claude-box` and reused for every project.
 ```bash
 claude-box                                   # start Claude Code in the current repo
 claude-box --dangerously-skip-permissions    # no confirmation prompts (the box is the boundary)
-claude-box --continue                        # any claude argument is passed through
+claude-box --continue                        # resume the most recent session in this repo
+claude-box --resume                          # pick a past session of this repo from a list
+claude-box --add-dir ../other-repo           # also give read-write access to another repo
 claude-box shell                             # bash in the same environment, for debugging
-claude-box mounts --add-dir ../other-repo    # list what the box would see (read-write / read-only)
-claude-box --add-dir ../other-repo          # also give access to another repo
+claude-box mounts                            # list what the box would see, and exit
 CLAUDE_BOX_GPUS=all claude-box               # with GPUs (or set it in .env)
 CLAUDE_BOX_DRY_RUN=1 claude-box              # print the docker command, run nothing
 ```
 
-You can start it from any subfolder: the whole git repo is mounted (at the **same absolute path**
-as on the host, so paths and relative symlinks behave the same inside and outside).
+Any other argument is passed through to Claude Code. You can start it from any subfolder: the whole
+git repo is mounted (at the **same absolute path** as on the host, so paths and relative symlinks
+behave the same inside and outside).
+
+### Sessions
+
+Sessions are stored per repo in `~/.claude-box/.claude/projects/` (one folder per repo path, one
+`<session-id>.jsonl` file per session). Resume them from the same repo folder with
+`claude-box --continue`, `claude-box --resume`, or `claude-box --resume <session-id>`. They survive
+image rebuilds. Sessions from a Claude Code installed directly on the host are separate and can't be
+resumed in the box (and vice versa).
 
 ### Working on several repos
 
 Claude only sees the repo you start it from. To give it more:
 
 ```bash
-# Read-write access to other repos (mounted, and passed to Claude's own --add-dir)
+# Read-write access for one session (mounted, and passed to Claude's own --add-dir)
 cd ~/workspaces/repo-a
 claude-box --add-dir ../repo-b ../repo-c
 
-# Read-only access, e.g. a repo Claude should only look at for reference:
-# add its path to .claude-box.mounts (see "Data and symlinks" below)
+# Read-write access for every session of this repo: add "../repo-b:rw" to .claude-box.mounts
+# Read-only access (e.g. reference code): add "../repo-b" to .claude-box.mounts
+# (see "Data, references and symlinks" below)
 
 # Everything in a folder of repos, read-write (convenient, but less protection)
 cd ~/workspaces
@@ -109,25 +124,42 @@ and use `.claude-box.mounts` in `~/workspaces`.
 ### Python / uv
 
 Inside the box, `uv` is a small wrapper (`uv-shim.sh`) that gives each project its own venv in
-`~/.claude-box/venvs/<project>-<hash>`, so your host `.venv` folders are never touched, even when
-Claude works across several repos. Always go through `uv run ...` inside the box, since the
-project's `.venv/bin/python` belongs to the host and won't work there. The first time, ask Claude to run `uv sync`. PyTorch wheels bring
-their own CUDA libraries, so no CUDA image is needed.
+`~/.claude-box/venvs/<project>-<hash>`, so your host `.venv` folders are never used or touched, even
+when Claude works across several repos. Inside the box, the repo's `.venv` appears empty: it belongs
+to the host and its interpreter doesn't exist in the container.
 
-### Data and symlinks
+Always go through `uv run ...` inside the box. The first `uv sync` of a project downloads its
+packages (several GB with PyTorch); later syncs use the shared cache. PyTorch wheels bring their own
+CUDA libraries, so no CUDA image is needed.
+
+### Box instructions for Claude (`box-CLAUDE.md`)
+
+`box-CLAUDE.md` is mounted read-only as Claude's user-level `CLAUDE.md` (`/box/.claude/CLAUDE.md`),
+so Claude reads it in every session, in every project. It explains the environment: use `uv`, never
+create scratch venvs, check for a GPU before planning GPU work, commit but never push. Project
+instructions stay in each repo's own `CLAUDE.md`. Edit `box-CLAUDE.md` here to change the rules for
+everyone; no rebuild is needed.
+
+### Data, references and symlinks
 
 Symlinks inside the repo that point **outside** of it (e.g. `data/scorpion -> /mnt/nas/scorpion`)
 are detected automatically and their targets are mounted **read-only** at the same path, so the
 links keep working.
 
 To mount extra folders, or a single parent folder instead of many small ones, create
-`.claude-box.mounts` at the repo root, one path per line:
+`.claude-box.mounts` at the repo root, one path per line. Paths are read-only by default; append
+`:rw` for read-write, like Docker's `-v` option (`:ro` is accepted too):
 
 ```
-# read-only data
-/mnt/nas/scorpion
-~/datasets/shared   # ~ is expanded
+../SIPE-main            # read-only reference code
+/mnt/nas/scorpion       # read-only data
+../vfm-geom-xai:rw      # read-write: Claude may modify it
+~/datasets/shared:ro    # explicit read-only; ~ is expanded
 ```
+
+Relative paths are relative to the repo root. `:rw` entries behave like `--add-dir`: they are passed
+to Claude as part of the session, and their `.venv` is hidden too. Only the `.claude-box.mounts` of
+the repo you start from can grant read-write access. Check the result with `claude-box mounts`.
 
 If a repo has many symlinks to scattered places, list the parent folders in that file and set
 `CLAUDE_BOX_AUTO_MOUNTS=0`.
@@ -135,8 +167,8 @@ If a repo has many symlinks to scattered places, list the parent folders in that
 ## Settings (`.env`)
 
 Everything is configured in `~/claude-box/.env` (created by `install.sh` from `.env.example`, never
-committed). Format is `KEY=value`, one per line; `~` and `$HOME` are expanded. The file is parsed, not executed,
-so nothing in it can run commands.
+committed). Format is `KEY=value`, one per line; `~` and `$HOME` are expanded. The file is parsed,
+not executed, so nothing in it can run commands.
 
 Path lists use `:` as separator, like `PATH`, with no spaces:
 
@@ -162,7 +194,7 @@ WANDB_API_KEY
 
 | Key | Default | Meaning |
 |---|---|---|
-| `CLAUDE_BOX_RW` | *(none)* | Extra read-write folders (not treated as projects) |
+| `CLAUDE_BOX_RW` | *(none)* | Extra read-write folders, for every project (not treated as projects) |
 | `CLAUDE_BOX_RO` | *(none)* | Extra read-only folders, for every project |
 | `CLAUDE_BOX_GPUS` | *(none)* | Value passed to `docker --gpus` (e.g. `all`, `device=0`) |
 | `CLAUDE_BOX_AUTO_MOUNTS` | `1` | Auto-mount symlink targets read-only |
@@ -197,6 +229,9 @@ Auto-update is disabled inside the container. To update, rebuild the image:
 cd ~/claude-box && git pull && ./install.sh --no-cache
 ```
 
+Changes to the launcher, `box-CLAUDE.md` or `.env` apply on the next start, without a rebuild. Only
+`Dockerfile` and `uv-shim.sh` changes need `./install.sh`.
+
 ## Troubleshooting
 
 - **`docker context 'rootless' not found`**: rootless Docker is not installed or not running
@@ -205,8 +240,13 @@ cd ~/claude-box && git pull && ./install.sh --no-cache
   mode, root inside the container already maps to you.
 - **A symlink is broken inside the box**: its target doesn't exist on the host, or auto-mounts are
   disabled. Add the target to `.claude-box.mounts`.
+- **Claude improvises Python environments** (scratch venvs, reusing the host `.venv`): check that
+  `box-CLAUDE.md` exists next to the launcher (`claude-box mounts` shows it), then tell Claude to run
+  `uv sync` and use `uv run`.
+- **Claude says there is no GPU**: set `CLAUDE_BOX_GPUS=all` in `.env` (and do the GPU setup step
+  above once).
 - **`--dangerously-skip-permissions` refuses to run as root**: the launcher sets `IS_SANDBOX=1`,
   which is the usual workaround. If a Claude Code update changes this, check the Claude Code docs or
   issues.
 - **The launcher refuses to start**: it won't mount `/` or your home directory read-write (neither
-  as the current folder nor with `--add-dir`). Run it from inside a project folder.
+  as the current folder, with `--add-dir`, nor with `:rw`). Run it from inside a project folder.
