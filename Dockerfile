@@ -3,6 +3,7 @@ FROM python:3.12-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep procps less \
+    build-essential \
  && rm -rf /var/lib/apt/lists/*
 
 # uv, behind a small wrapper that keeps one venv per project in the box home
