@@ -1,4 +1,4 @@
-# claude-box image: Claude Code + uv + git, nothing else.
+# claude-box image: Claude Code + uv + git + nvim (as $EDITOR), nothing else.
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -19,3 +19,10 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 
 # Updates are done by rebuilding the image (./install.sh --no-cache)
 ENV DISABLE_AUTOUPDATER=1
+
+# Neovim, for Ctrl+G (edit prompt) and opening the transcript (Ctrl+O, then v)
+RUN arch="$(uname -m | sed 's/aarch64/arm64/')" \
+ && curl -fsSL "https://github.com/neovim/neovim/releases/download/stable/nvim-linux-${arch}.tar.gz" \
+    | tar -xz -C /opt \
+ && ln -s "/opt/nvim-linux-${arch}/bin/nvim" /usr/local/bin/nvim
+ENV EDITOR=nvim VISUAL=nvim
