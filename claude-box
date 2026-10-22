@@ -167,6 +167,26 @@ for p in "${_ro[@]}"; do
   add_ro "$(readlink -f "$p")"
 done
 
+# 1b) Host Neovim config and plugins (CLAUDE_BOX_NVIM=1): mounted read-only at
+#     their host paths and linked from the box home, so $EDITOR (Ctrl+G, Ctrl+O v)
+#     uses your setup. An existing link or non-empty folder in the box home wins.
+link_nvim() {  # <host dir> <path inside the box home>
+  local src="$1" dst="$BOX_HOME/$2" real
+  [[ -d "$src" ]] || return 0
+  real="$(readlink -f "$src")"
+  add_ro "$real"
+  [[ "$DRY_RUN" == 1 || "$MODE" == mounts || -L "$dst" ]] && return 0
+  if [[ -d "$dst" ]] && ! rmdir "$dst" 2>/dev/null; then
+    warn "$dst is not empty; host nvim folder not linked"; return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  ln -s "$real" "$dst"
+}
+if [[ "${CLAUDE_BOX_NVIM:-1}" == 1 ]]; then
+  link_nvim "${XDG_CONFIG_HOME:-$HOME/.config}/nvim" .config/nvim
+  link_nvim "${XDG_DATA_HOME:-$HOME/.local/share}/nvim" .local/share/nvim
+fi
+
 for d in "${RW_DIRS[@]}"; do
   # 2) Per-project list: one path per line in <folder>/.claude-box.mounts
   #    ("# comments" ok; "<path>:rw" handled above; optional explicit "<path>:ro")

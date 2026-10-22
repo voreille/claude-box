@@ -202,6 +202,7 @@ WANDB_API_KEY
 | `CLAUDE_BOX_RO` | *(none)* | Extra read-only folders, for every project |
 | `CLAUDE_BOX_GPUS` | *(none)* | Value passed to `docker --gpus` (e.g. `all`, `device=0`) |
 | `CLAUDE_BOX_AUTO_MOUNTS` | `1` | Auto-mount symlink targets read-only |
+| `CLAUDE_BOX_NVIM` | `1` | Use your host Neovim config and plugins in the box (see below) |
 | `CLAUDE_BOX_CONTEXT` | `rootless` | Docker context to use |
 | `CLAUDE_BOX_IMAGE` | `claude-box` | Image name |
 | `CLAUDE_BOX_HOME` | `~/.claude-box` | Persistent state directory |
@@ -224,6 +225,14 @@ and its target are mounted. Check the result with `claude-box mounts`.
 
 Rule of thumb: **read-write** for anything that can be re-downloaded or regenerated, **read-only**
 for anything you cannot afford to lose.
+
+### Neovim
+
+The image ships `nvim` as `$EDITOR`, used by Ctrl+G (edit the prompt) and Ctrl+O then `v` (open the
+transcript). With `CLAUDE_BOX_NVIM=1` the launcher mounts your host `~/.config/nvim` and
+`~/.local/share/nvim` (symlinks resolved) **read-only** and links them from `~/.claude-box`, so nvim
+in the box starts with your settings and plugins. Install or update plugins on the host: the box
+cannot write there. A link or non-empty folder you already have in `~/.claude-box` is left alone.
 
 ## Updating Claude Code
 
