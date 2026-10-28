@@ -235,6 +235,7 @@ if [[ "$MODE" == mounts ]]; then
   [[ -n "${CLAUDE_BOX_GPUS:-}" ]] && echo "GPUs: $CLAUDE_BOX_GPUS"
   for d in "${RW_DIRS[@]}"; do [[ -d "$d/.venv" ]] && echo "Hidden: $d/.venv (host venv, masked)"; done
   [[ -f "$SCRIPT_DIR/box-CLAUDE.md" ]] && echo "Box instructions: box-CLAUDE.md (seen as /box/.claude/CLAUDE.md)"
+  [[ -f "$SCRIPT_DIR/box-keybindings.json" ]] && echo "Box keybindings: box-keybindings.json (seen as /box/.claude/keybindings.json)"
   echo "Everything else on the server: not visible."
   exit 0
 fi
@@ -259,6 +260,7 @@ if [[ -f "$SCRIPT_DIR/box-CLAUDE.md" ]]; then
 else
   warn "box-CLAUDE.md not found next to the script; Claude won't get the box instructions."
 fi
+[[ -f "$SCRIPT_DIR/box-keybindings.json" ]] && EXTRA+=(-v "$SCRIPT_DIR/box-keybindings.json:/box/.claude/keybindings.json:ro")
 
 if [[ "$MODE" == shell ]]; then CMD=(bash); else CMD=(claude "${ARGS[@]}"); fi
 

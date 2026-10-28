@@ -13,6 +13,7 @@ only modify the project you are working on, and nothing else on the server.
 | Data that the repo symlinks to, or listed in `.claude-box.mounts` or `CLAUDE_BOX_RO` | **read-only** |
 | `~/.gitconfig` | read-only (so commits use your name) |
 | `box-CLAUDE.md` (instructions about the box, for Claude) | read-only |
+| `box-keybindings.json` (Claude Code keybindings) | read-only |
 | The repo's own `.venv` (host environment) | **hidden** (masked by an empty folder) |
 | Everything else (your home, other repos, other users, the system) | **not visible at all** |
 
@@ -140,6 +141,13 @@ create scratch venvs, check for a GPU before planning GPU work, commit but never
 instructions stay in each repo's own `CLAUDE.md`. Edit `box-CLAUDE.md` here to change the rules for
 everyone; no rebuild is needed.
 
+### Keybindings (`box-keybindings.json`)
+
+`box-keybindings.json` is mounted read-only as Claude Code's `~/.claude/keybindings.json`
+(`/box/.claude/keybindings.json`), so every box shares the same shortcuts. It currently unbinds
+`Escape` in the chat input (a Vim reflex kept interrupting Claude); interrupt with `Ctrl+C` instead.
+See the [keybindings docs](https://code.claude.com/docs/en/keybindings) for the format.
+
 ### Data, references and symlinks
 
 Symlinks inside the repo that point **outside** of it (e.g. `data/scorpion -> /mnt/nas/scorpion`)
@@ -242,7 +250,7 @@ Auto-update is disabled inside the container. To update, rebuild the image:
 cd ~/claude-box && git pull && ./install.sh --no-cache
 ```
 
-Changes to the launcher, `box-CLAUDE.md` or `.env` apply on the next start, without a rebuild. Only
+Changes to the launcher, `box-CLAUDE.md`, `box-keybindings.json` or `.env` apply on the next start, without a rebuild. Only
 `Dockerfile` and `uv-shim.sh` changes need `./install.sh`.
 
 ## Troubleshooting
